@@ -19,7 +19,7 @@ from scipy.fft import fft, fftfreq
 
 
 # ============================================================
-# 配置和初始化
+# 配置和初始化 - 从环境变量读取
 # ============================================================
 
 # 彻底解决编码问题
@@ -34,18 +34,43 @@ def setup_encoding():
 
 setup_encoding()
 
+# 从环境变量读取配置，如果没有则使用默认值
+DATA_SOURCE_BASE_URL = os.environ.get("DATA_SOURCE_BASE_URL", "http://58.57.159.186:30200")
+API_TIMEOUT = int(os.environ.get("API_TIMEOUT", "30"))
+SECRET_KEY = os.environ.get("SECRET_KEY", "dev-secret-key-change-in-production")
+LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")
+FLASK_ENV = os.environ.get("FLASK_ENV", "production")
+
+# 解析CORS_ORIGINS环境变量，支持多个域名用逗号分隔
+cors_origins_str = os.environ.get("CORS_ORIGINS", "*")
+if cors_origins_str == "*":
+    CORS_ORIGINS = "*"
+else:
+    CORS_ORIGINS = [origin.strip() for origin in cors_origins_str.split(",")]
+
+# 设置日志级别
+log_level_map = {
+    "DEBUG": logging.DEBUG,
+    "INFO": logging.INFO,
+    "WARNING": logging.WARNING,
+    "ERROR": logging.ERROR,
+    "CRITICAL": logging.CRITICAL
+}
+logging.basicConfig(level=log_level_map.get(LOG_LEVEL, logging.INFO))
+
 # 禁用所有不需要的日志
-werkzeug_log = logging.getLogger('werkzeug')
-werkzeug_log.disabled = True
-logging.getLogger('urllib3').setLevel(logging.WARNING)
-logging.getLogger('requests').setLevel(logging.WARNING)
+if FLASK_ENV == "production":
+    werkzeug_log = logging.getLogger('werkzeug')
+    werkzeug_log.disabled = True
+    logging.getLogger('urllib3').setLevel(logging.WARNING)
+    logging.getLogger('requests').setLevel(logging.WARNING)
 
 # 创建Flask应用
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "*"}})
+app.config['SECRET_KEY'] = SECRET_KEY
 
-# 数据源基础URL
-BASE_URL = "http://58.57.159.186:30200"
+# 配置CORS
+CORS(app, resources={r"/*": {"origins": CORS_ORIGINS}})
 
 # IMU相关配置
 SAMPLE_RATE = 50  # Hz
@@ -63,6 +88,7 @@ def format_response(status="success", data=None, message=None, **kwargs):
     response = {
         "status": status,
         "timestamp": datetime.datetime.now().isoformat(),
+        "environment": FLASK_ENV,
         **kwargs
     }
     if data is not None:
@@ -79,6 +105,13 @@ def validate_time_format(time_str):
         return True
     except ValueError:
         return False
+
+
+def log_request_info(endpoint, params):
+    """记录请求信息"""
+    if LOG_LEVEL == "DEBUG":
+        print(f"📡 请求端点: {endpoint}")
+        print(f"📊 请求参数: {params}")
 
 
 # ============================================================
@@ -116,16 +149,17 @@ def generate_mock_wind_wave_data(st1, st2, dataname):
 
             current_dt += datetime.timedelta(hours=1)
 
+        print(f"🔧 生成模拟{dataname}数据: {len(data)}条记录")
         return data
     except Exception as e:
-        print(f"生成模拟数据错误: {e}")
+        print(f"❌ 生成模拟数据错误: {e}")
         return []
 
 
 def get_wind_wave_data(st1: str, st2: str, classic: int, dataname: str):
     """获取风浪数据"""
     try:
-        url = f"{BASE_URL}/getdata/getwindwavedata"
+        url = f"{DATA_SOURCE_BASE_URL}/getdata/getwindwavedata"
         headers = {
             'Content-Type': 'application/json',
             'User-Agent': 'Mozilla/5.0'
@@ -138,19 +172,28 @@ def get_wind_wave_data(st1: str, st2: str, classic: int, dataname: str):
             "dataname": dataname
         }
 
-        r = requests.post(url, json=payload, headers=headers, timeout=15)
+        print(f"🔗 请求风浪数据API: {url}")
+        print(f"📦 请求参数: {payload}")
+
+        # 使用环境变量中的超时时间
+        r = requests.post(url, json=payload, headers=headers, timeout=API_TIMEOUT)
+
+        print(f"📨 响应状态: {r.status_code}")
 
         if r.status_code == 200:
             try:
                 response_data = r.json()
                 data = response_data.get("data", [])
+                print(f"✅ 成功获取{dataname}数据: {len(data)}条记录")
                 return {
                     "status": "success",
                     "source": "api",
                     "count": len(data),
                     "data": data
                 }
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as e:
+                print(f"❌ JSON解析失败: {e}")
+                print(f"📄 原始响应(前500字符): {r.text[:500]}")
                 # 使用模拟数据
                 mock_data = generate_mock_wind_wave_data(st1, st2, dataname)
                 return {
@@ -160,6 +203,7 @@ def get_wind_wave_data(st1: str, st2: str, classic: int, dataname: str):
                     "data": mock_data
                 }
         else:
+            print(f"⚠️ HTTP错误: {r.status_code}")
             # 使用模拟数据作为备用
             mock_data = generate_mock_wind_wave_data(st1, st2, dataname)
             return {
@@ -169,8 +213,28 @@ def get_wind_wave_data(st1: str, st2: str, classic: int, dataname: str):
                 "data": mock_data
             }
 
+    except requests.exceptions.Timeout:
+        print(f"⏱️  请求超时: {dataname}数据获取超时")
+        mock_data = generate_mock_wind_wave_data(st1, st2, dataname)
+        return {
+            "status": "warning",
+            "source": "mock",
+            "count": len(mock_data),
+            "data": mock_data
+        }
+
+    except requests.exceptions.ConnectionError:
+        print(f"🔌 连接错误: 无法连接到数据源")
+        mock_data = generate_mock_wind_wave_data(st1, st2, dataname)
+        return {
+            "status": "warning",
+            "source": "mock",
+            "count": len(mock_data),
+            "data": mock_data
+        }
+
     except Exception as e:
-        print(f"获取{dataname}数据失败: {e}")
+        print(f"❌ 获取{dataname}数据失败: {e}")
         mock_data = generate_mock_wind_wave_data(st1, st2, dataname)
         return {
             "status": "error",
@@ -187,33 +251,41 @@ def get_wind_wave_data(st1: str, st2: str, classic: int, dataname: str):
 def get_gnss_data_names(year, month, day, hour, classic=None):
     """获取GNSS数据文件名列表"""
     try:
+        url = f"{DATA_SOURCE_BASE_URL}/getdata/getgnssdatanames"
+        print(f"🔗 请求GNSS文件列表: {url}")
+
         r = requests.post(
-            f"{BASE_URL}/getdata/getgnssdatanames",
+            url,
             json={"year": year, "month": month, "day": day, "hour": hour},
-            timeout=10
+            timeout=API_TIMEOUT
         )
         r.raise_for_status()
         files = r.json().get("files", [])
+        print(f"✅ 获取到{len(files)}个GNSS文件")
         return files
     except Exception as e:
-        print(f"查询文件名失败: {e}")
+        print(f"❌ 查询文件名失败: {e}")
         return []
 
 
 def get_bin_bytes(sdt):
     """获取二进制文件内容"""
     try:
-        r = requests.get(f"{BASE_URL}/getdata/getGnssData/{sdt}", timeout=10)
+        url = f"{DATA_SOURCE_BASE_URL}/getdata/getGnssData/{sdt}"
+        print(f"🔗 请求二进制文件: {url}")
+
+        r = requests.get(url, timeout=API_TIMEOUT)
         if r.status_code == 200:
+            print(f"✅ 成功获取文件: {sdt}, 大小: {len(r.content)}字节")
             return r.content
         elif r.status_code == 404:
-            print(f"文件不存在: {sdt}")
+            print(f"❌ 文件不存在: {sdt}")
             return None
         else:
-            print(f"获取失败，状态码: {r.status_code}")
+            print(f"⚠️ 获取失败，状态码: {r.status_code}")
             return None
     except Exception as e:
-        print(f"获取文件失败: {e}")
+        print(f"❌ 获取文件失败: {e}")
         return None
 
 
@@ -256,6 +328,7 @@ def parse_bin_bytes(content: bytes, base_time: datetime.datetime):
         else:
             i += 1
 
+    print(f"📊 解析完成: {len(frames)}帧数据")
     return pd.DataFrame(frames)
 
 
@@ -406,6 +479,8 @@ def process_window_data(window_df):
 
 def process_imu_data(st1: str, st2: str, classic=None):
     """处理IMU数据"""
+    print(f"🔄 开始处理IMU数据: {st1} 到 {st2}, 站点: {classic}")
+
     dt_start = datetime.datetime.strptime(st1, "%Y%m%d%H%M")
     dt_end = datetime.datetime.strptime(st2, "%Y%m%d%H%M")
 
@@ -416,6 +491,7 @@ def process_imu_data(st1: str, st2: str, classic=None):
     while current_hour <= end_hour:
         year, month, day, hour = current_hour.year, current_hour.month, current_hour.day, current_hour.hour
         files = get_gnss_data_names(year, month, day, hour)
+        print(f"  小时 {current_hour.strftime('%Y-%m-%d %H:%M')}: 找到 {len(files)} 个文件")
 
         for filename in files:
             sdt = extract_timestamp_from_filename(filename)
@@ -428,19 +504,25 @@ def process_imu_data(st1: str, st2: str, classic=None):
                             "sdt": sdt,
                             "file_dt": file_dt
                         })
+                        if LOG_LEVEL == "DEBUG":
+                            print(f"    ✓ 匹配文件: {filename}")
                 except Exception as e:
-                    print(f"解析文件时间失败: {filename}, 错误: {e}")
+                    print(f"❌ 解析文件时间失败: {filename}, 错误: {e}")
 
         current_hour += datetime.timedelta(hours=1)
 
     all_files_info.sort(key=lambda x: x["file_dt"])
 
     if not all_files_info:
+        print("⚠️ 没有在指定时间范围内找到任何文件")
         return []
+
+    print(f"📁 总共找到 {len(all_files_info)} 个文件需要处理")
 
     all_data_frames = []
 
     for file_info in all_files_info:
+        print(f"📄 处理文件: {file_info['filename']}")
         content = get_bin_bytes(file_info["sdt"])
         if content:
             try:
@@ -448,14 +530,26 @@ def process_imu_data(st1: str, st2: str, classic=None):
                 df = parse_bin_bytes(content, file_dt)
                 if not df.empty:
                     all_data_frames.append(df)
+                    print(f"   ✓ 成功解析: {len(df)}行数据")
+                else:
+                    print(f"   ⚠️ 文件解析后无数据")
             except Exception as e:
-                print(f"解析文件失败: {file_info['filename']}, 错误: {e}")
+                print(f"❌ 解析文件失败: {file_info['filename']}, 错误: {e}")
+                if LOG_LEVEL == "DEBUG":
+                    import traceback
+                    traceback.print_exc()
+        else:
+            print(f"❌ 无法获取文件内容")
 
     if not all_data_frames:
+        print("❌ 没有成功解析任何数据")
         return []
 
     combined_df = pd.concat(all_data_frames, ignore_index=True)
     combined_df = combined_df.sort_values('timestamp_seconds')
+
+    print(f"📊 合并后总数据点数: {len(combined_df)}")
+    print(f"⏰ 数据时间范围: {combined_df.iloc[0]['time_str']} 到 {combined_df.iloc[-1]['time_str']}")
 
     window_results = []
     window_size_samples = WINDOW_SIZE
@@ -468,7 +562,10 @@ def process_imu_data(st1: str, st2: str, classic=None):
             result = process_window_data(window_df)
             if result:
                 window_results.append(result)
+                if LOG_LEVEL == "DEBUG":
+                    print(f"   ✓ 处理窗口 {i // window_size_samples + 1}, 开始时间: {result['window_start_time']}")
 
+    print(f"✅ 共处理 {len(window_results)} 个10分钟窗口")
     return window_results
 
 
@@ -482,11 +579,19 @@ def home():
     return format_response(
         message="海洋监测平台后端服务",
         version="1.0.0",
+        environment=FLASK_ENV,
+        config={
+            "data_source": DATA_SOURCE_BASE_URL,
+            "api_timeout": API_TIMEOUT,
+            "log_level": LOG_LEVEL,
+            "cors_origins": CORS_ORIGINS
+        },
         endpoints={
             "wind_wave_data": "POST /api/wind_wave_data - 获取风浪数据",
             "imu_platform_swing": "POST /api/imu_platform_swing - 获取IMU平台晃动数据",
             "imu_file_list": "POST /api/imu_file_list - 获取IMU文件列表",
             "health": "GET /health - 健康检查",
+            "config": "GET /config - 查看当前配置",
             "test": "GET /test - 测试接口"
         }
     )
@@ -498,8 +603,23 @@ def health():
     return format_response(
         status="healthy",
         service="Marine Monitoring Platform API",
-        timestamp=datetime.datetime.now().isoformat()
+        timestamp=datetime.datetime.now().isoformat(),
+        uptime=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     )
+
+
+@app.route("/config")
+def show_config():
+    """显示当前配置（生产环境建议禁用或限制访问）"""
+    config = {
+        "data_source_base_url": DATA_SOURCE_BASE_URL,
+        "api_timeout": API_TIMEOUT,
+        "log_level": LOG_LEVEL,
+        "flask_env": FLASK_ENV,
+        "cors_origins": CORS_ORIGINS,
+        "secret_key_set": bool(SECRET_KEY and SECRET_KEY != "dev-secret-key-change-in-production")
+    }
+    return jsonify(format_response(data=config))
 
 
 @app.route("/test")
@@ -507,6 +627,7 @@ def test():
     """测试接口"""
     return format_response(
         message="后端服务运行正常",
+        environment=FLASK_ENV,
         endpoints={
             "wind_wave_data": {"method": "POST", "path": "/api/wind_wave_data", "params": ["st1", "st2", "classic"]},
             "imu_platform_swing": {"method": "POST", "path": "/api/imu_platform_swing",
@@ -525,6 +646,8 @@ def wind_wave_data():
         st2 = payload.get("st2")
         classic = payload.get("classic")
 
+        log_request_info("/api/wind_wave_data", payload)
+
         if not (st1 and st2 and classic):
             return jsonify(format_response("error", None, "缺少参数: st1, st2, classic")), 400
 
@@ -532,6 +655,8 @@ def wind_wave_data():
             return jsonify(format_response("error", None, "时间格式错误，应为YYYYMMDDHHMM")), 400
 
         classic = int(classic)
+
+        print(f"🌊 开始获取风浪数据: 站点={classic}, 时间={st1}到{st2}")
 
         wind_result = get_wind_wave_data(st1, st2, classic, "wind")
         wave_result = get_wind_wave_data(st1, st2, classic, "wave")
@@ -548,10 +673,15 @@ def wind_wave_data():
             }
         )
 
+        print(f"✅ 风浪数据获取完成，总数据量: {wind_result.get('count', 0) + wave_result.get('count', 0)}条")
         return jsonify(response_data)
 
     except Exception as e:
         error_msg = str(e)
+        print(f"❌ 服务器内部错误: {error_msg}")
+        if LOG_LEVEL == "DEBUG":
+            import traceback
+            traceback.print_exc()
         return jsonify(format_response("error", None, f"服务器内部错误: {error_msg}")), 500
 
 
@@ -564,15 +694,19 @@ def imu_platform_swing():
         st2 = payload.get("st2")
         classic = payload.get("classic")
 
+        log_request_info("/api/imu_platform_swing", payload)
+
         if not (st1 and st2):
             return jsonify(format_response("error", None, "缺少参数: st1, st2")), 400
 
         if not (validate_time_format(st1) and validate_time_format(st2)):
             return jsonify(format_response("error", None, "时间格式错误，应为YYYYMMDDHHMM")), 400
 
+        print(f"🔄 开始处理IMU平台晃动数据: 站点={classic}, 时间={st1}到{st2}")
+
         results = process_imu_data(st1, st2, classic)
 
-        return jsonify(format_response(
+        response = format_response(
             data={
                 "parameters": {
                     "start_time": st1,
@@ -584,9 +718,16 @@ def imu_platform_swing():
                 "total_windows": len(results),
                 "data": results
             }
-        ))
+        )
+
+        print(f"✅ IMU数据处理完成: {len(results)}个窗口")
+        return jsonify(response)
 
     except Exception as e:
+        print(f"❌ 处理失败: {str(e)}")
+        if LOG_LEVEL == "DEBUG":
+            import traceback
+            traceback.print_exc()
         return jsonify(format_response("error", None, f"处理失败: {str(e)}")), 500
 
 
@@ -599,11 +740,15 @@ def imu_file_list():
         st2 = payload.get("st2")
         classic = payload.get("classic")
 
+        log_request_info("/api/imu_file_list", payload)
+
         if not (st1 and st2):
             return jsonify(format_response("error", None, "缺少参数: st1, st2")), 400
 
         dt_start = datetime.datetime.strptime(st1, "%Y%m%d%H%M")
         dt_end = datetime.datetime.strptime(st2, "%Y%m%d%H%M")
+
+        print(f"📁 获取IMU文件列表: 时间={st1}到{st2}, 站点={classic}")
 
         all_files_info = []
         current_hour = dt_start.replace(minute=0, second=0, microsecond=0)
@@ -631,14 +776,18 @@ def imu_file_list():
 
         all_files_info.sort(key=lambda x: x["timestamp"])
 
-        return jsonify(format_response(
+        response = format_response(
             data={
                 "count": len(all_files_info),
                 "files": all_files_info
             }
-        ))
+        )
+
+        print(f"✅ 文件列表获取完成: {len(all_files_info)}个文件")
+        return jsonify(response)
 
     except Exception as e:
+        print(f"❌ 处理失败: {str(e)}")
         return jsonify(format_response("error", None, f"处理失败: {str(e)}")), 500
 
 
@@ -650,19 +799,26 @@ if __name__ == "__main__":
     # Render会设置PORT环境变量
     port = int(os.environ.get("PORT", 5000))
 
-    print("========================================")
+    print("=" * 50)
     print("    海洋监测平台后端服务")
-    print("========================================")
-    print(f"端口: {port}")
-    print(f"环境: {'生产' if port != 5000 else '开发'}")
-    print("========================================")
-    print("可用端点:")
+    print("=" * 50)
+    print(f"🌍 环境: {FLASK_ENV}")
+    print(f"🔌 端口: {port}")
+    print(f"📡 数据源: {DATA_SOURCE_BASE_URL}")
+    print(f"⏱️  超时: {API_TIMEOUT}秒")
+    print(f"📝 日志级别: {LOG_LEVEL}")
+    print(f"🔗 CORS允许源: {CORS_ORIGINS}")
+    print("=" * 50)
+    print("🛠️ 可用端点:")
     print("  GET  /           - 主页")
     print("  GET  /health     - 健康检查")
+    print("  GET  /config     - 查看配置")
     print("  GET  /test       - 测试接口")
     print("  POST /api/wind_wave_data - 风浪数据")
     print("  POST /api/imu_platform_swing - IMU数据")
     print("  POST /api/imu_file_list - IMU文件列表")
-    print("========================================")
+    print("=" * 50)
 
-    app.run(host="0.0.0.0", port=port, debug=False)
+    # 根据环境决定是否开启调试模式
+    debug_mode = FLASK_ENV != "production"
+    app.run(host="0.0.0.0", port=port, debug=debug_mode)
