@@ -1,21 +1,17 @@
-# app.py - 统一的后端服务（适配Render部署）
+# app.py - 统一的后端服务（适配Render部署）- 无模拟数据版本
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import requests
 import datetime
-import random
-import json
-import os
-import sys
-import io
-import logging
 import struct
 import pandas as pd
 import numpy as np
 from scipy.optimize import curve_fit
 import re
-from scipy.signal import find_peaks
 from scipy.fft import fft, fftfreq
+import os
+import sys
+import logging
 
 
 # ============================================================
@@ -41,13 +37,6 @@ SECRET_KEY = os.environ.get("SECRET_KEY", "dev-secret-key-change-in-production")
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")
 FLASK_ENV = os.environ.get("FLASK_ENV", "production")
 
-# 解析CORS_ORIGINS环境变量，支持多个域名用逗号分隔
-cors_origins_str = os.environ.get("CORS_ORIGINS", "*")
-if cors_origins_str == "*":
-    CORS_ORIGINS = "*"
-else:
-    CORS_ORIGINS = [origin.strip() for origin in cors_origins_str.split(",")]
-
 # 设置日志级别
 log_level_map = {
     "DEBUG": logging.DEBUG,
@@ -70,7 +59,7 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = SECRET_KEY
 
 # 配置CORS
-CORS(app, resources={r"/*": {"origins": CORS_ORIGINS}})
+CORS(app)
 
 # IMU相关配置
 SAMPLE_RATE = 50  # Hz
@@ -107,57 +96,12 @@ def validate_time_format(time_str):
         return False
 
 
-def log_request_info(endpoint, params):
-    """记录请求信息"""
-    if LOG_LEVEL == "DEBUG":
-        print(f"📡 请求端点: {endpoint}")
-        print(f"📊 请求参数: {params}")
-
-
 # ============================================================
-# 风浪数据功能（原getwindwavedata.py）
+# 风浪数据功能
 # ============================================================
-
-def generate_mock_wind_wave_data(st1, st2, dataname):
-    """生成模拟风浪数据"""
-    try:
-        start_dt = datetime.datetime.strptime(st1, "%Y%m%d%H%M")
-        end_dt = datetime.datetime.strptime(st2, "%Y%m%d%H%M")
-
-        data = []
-        current_dt = start_dt
-
-        while current_dt <= end_dt:
-            if dataname == "wind":
-                data.append({
-                    "sdt": current_dt.strftime("%Y%m%d%H%M"),
-                    "df": 5 + random.random() * 10,
-                    "wd": random.random() * 360,
-                    "ws": 5 + random.random() * 10
-                })
-            elif dataname == "wave":
-                data.append({
-                    "sdt": current_dt.strftime("%Y%m%d%H%M"),
-                    "avgH": 0.5 + random.random() * 2,
-                    "maxH": 1 + random.random() * 3
-                })
-            else:
-                data.append({
-                    "sdt": current_dt.strftime("%Y%m%d%H%M"),
-                    "value": random.random() * 100
-                })
-
-            current_dt += datetime.timedelta(hours=1)
-
-        print(f"🔧 生成模拟{dataname}数据: {len(data)}条记录")
-        return data
-    except Exception as e:
-        print(f"❌ 生成模拟数据错误: {e}")
-        return []
-
 
 def get_wind_wave_data(st1: str, st2: str, classic: int, dataname: str):
-    """获取风浪数据"""
+    """获取风浪数据 - 无模拟数据版本"""
     try:
         url = f"{DATA_SOURCE_BASE_URL}/getdata/getwindwavedata"
         headers = {
@@ -191,61 +135,58 @@ def get_wind_wave_data(st1: str, st2: str, classic: int, dataname: str):
                     "count": len(data),
                     "data": data
                 }
-            except json.JSONDecodeError as e:
+            except Exception as e:
                 print(f"❌ JSON解析失败: {e}")
-                print(f"📄 原始响应(前500字符): {r.text[:500]}")
-                # 使用模拟数据
-                mock_data = generate_mock_wind_wave_data(st1, st2, dataname)
                 return {
-                    "status": "warning",
-                    "source": "mock",
-                    "count": len(mock_data),
-                    "data": mock_data
+                    "status": "error",
+                    "source": "api",
+                    "count": 0,
+                    "data": [],
+                    "error": f"数据解析失败: {str(e)}"
                 }
         else:
             print(f"⚠️ HTTP错误: {r.status_code}")
-            # 使用模拟数据作为备用
-            mock_data = generate_mock_wind_wave_data(st1, st2, dataname)
             return {
-                "status": "warning",
-                "source": "mock",
-                "count": len(mock_data),
-                "data": mock_data
+                "status": "error",
+                "source": "api",
+                "count": 0,
+                "data": [],
+                "error": f"HTTP错误: {r.status_code}"
             }
 
     except requests.exceptions.Timeout:
         print(f"⏱️  请求超时: {dataname}数据获取超时")
-        mock_data = generate_mock_wind_wave_data(st1, st2, dataname)
         return {
-            "status": "warning",
-            "source": "mock",
-            "count": len(mock_data),
-            "data": mock_data
+            "status": "error",
+            "source": "api",
+            "count": 0,
+            "data": [],
+            "error": "请求超时"
         }
 
     except requests.exceptions.ConnectionError:
         print(f"🔌 连接错误: 无法连接到数据源")
-        mock_data = generate_mock_wind_wave_data(st1, st2, dataname)
         return {
-            "status": "warning",
-            "source": "mock",
-            "count": len(mock_data),
-            "data": mock_data
+            "status": "error",
+            "source": "api",
+            "count": 0,
+            "data": [],
+            "error": "连接数据源失败"
         }
 
     except Exception as e:
         print(f"❌ 获取{dataname}数据失败: {e}")
-        mock_data = generate_mock_wind_wave_data(st1, st2, dataname)
         return {
             "status": "error",
-            "source": "mock",
-            "count": len(mock_data),
-            "data": mock_data
+            "source": "api",
+            "count": 0,
+            "data": [],
+            "error": f"获取数据失败: {str(e)}"
         }
 
 
 # ============================================================
-# IMU数据功能（原getimudata.py）
+# IMU数据功能
 # ============================================================
 
 def get_gnss_data_names(year, month, day, hour, classic=None):
@@ -265,7 +206,7 @@ def get_gnss_data_names(year, month, day, hour, classic=None):
         return files
     except Exception as e:
         print(f"❌ 查询文件名失败: {e}")
-        return []
+        raise Exception(f"获取文件列表失败: {str(e)}")
 
 
 def get_bin_bytes(sdt):
@@ -423,7 +364,7 @@ def extract_dominant_frequency(acceleration, sample_rate=SAMPLE_RATE):
     if not np.any(valid_mask):
         return 0.0, 0.0
 
-    valid_freqs = positive_freqs[valid_mask]
+    valid_freqs = valid_freqs[valid_mask]
     valid_magnitude = positive_magnitude[valid_mask]
 
     dominant_idx = np.argmax(valid_magnitude)
@@ -478,7 +419,7 @@ def process_window_data(window_df):
 
 
 def process_imu_data(st1: str, st2: str, classic=None):
-    """处理IMU数据"""
+    """处理IMU数据 - 无模拟数据版本"""
     print(f"🔄 开始处理IMU数据: {st1} 到 {st2}, 站点: {classic}")
 
     dt_start = datetime.datetime.strptime(st1, "%Y%m%d%H%M")
@@ -490,24 +431,26 @@ def process_imu_data(st1: str, st2: str, classic=None):
 
     while current_hour <= end_hour:
         year, month, day, hour = current_hour.year, current_hour.month, current_hour.day, current_hour.hour
-        files = get_gnss_data_names(year, month, day, hour)
-        print(f"  小时 {current_hour.strftime('%Y-%m-%d %H:%M')}: 找到 {len(files)} 个文件")
+        try:
+            files = get_gnss_data_names(year, month, day, hour)
+            print(f"  小时 {current_hour.strftime('%Y-%m-%d %H:%M')}: 找到 {len(files)} 个文件")
 
-        for filename in files:
-            sdt = extract_timestamp_from_filename(filename)
-            if sdt:
-                try:
-                    file_dt = datetime.datetime.strptime(sdt, "%Y%m%d%H%M")
-                    if dt_start <= file_dt <= dt_end:
-                        all_files_info.append({
-                            "filename": filename,
-                            "sdt": sdt,
-                            "file_dt": file_dt
-                        })
-                        if LOG_LEVEL == "DEBUG":
-                            print(f"    ✓ 匹配文件: {filename}")
-                except Exception as e:
-                    print(f"❌ 解析文件时间失败: {filename}, 错误: {e}")
+            for filename in files:
+                sdt = extract_timestamp_from_filename(filename)
+                if sdt:
+                    try:
+                        file_dt = datetime.datetime.strptime(sdt, "%Y%m%d%H%M")
+                        if dt_start <= file_dt <= dt_end:
+                            all_files_info.append({
+                                "filename": filename,
+                                "sdt": sdt,
+                                "file_dt": file_dt
+                            })
+                    except Exception as e:
+                        print(f"❌ 解析文件时间失败: {filename}, 错误: {e}")
+        except Exception as e:
+            print(f"❌ 获取小时{current_hour}文件列表失败: {e}")
+            raise Exception(f"获取文件列表失败: {str(e)}")
 
         current_hour += datetime.timedelta(hours=1)
 
@@ -535,11 +478,10 @@ def process_imu_data(st1: str, st2: str, classic=None):
                     print(f"   ⚠️ 文件解析后无数据")
             except Exception as e:
                 print(f"❌ 解析文件失败: {file_info['filename']}, 错误: {e}")
-                if LOG_LEVEL == "DEBUG":
-                    import traceback
-                    traceback.print_exc()
+                raise Exception(f"解析文件{file_info['filename']}失败: {str(e)}")
         else:
             print(f"❌ 无法获取文件内容")
+            raise Exception(f"无法获取文件{file_info['filename']}的内容")
 
     if not all_data_frames:
         print("❌ 没有成功解析任何数据")
@@ -562,8 +504,6 @@ def process_imu_data(st1: str, st2: str, classic=None):
             result = process_window_data(window_df)
             if result:
                 window_results.append(result)
-                if LOG_LEVEL == "DEBUG":
-                    print(f"   ✓ 处理窗口 {i // window_size_samples + 1}, 开始时间: {result['window_start_time']}")
 
     print(f"✅ 共处理 {len(window_results)} 个10分钟窗口")
     return window_results
@@ -584,7 +524,6 @@ def home():
             "data_source": DATA_SOURCE_BASE_URL,
             "api_timeout": API_TIMEOUT,
             "log_level": LOG_LEVEL,
-            "cors_origins": CORS_ORIGINS
         },
         endpoints={
             "wind_wave_data": "POST /api/wind_wave_data - 获取风浪数据",
@@ -610,13 +549,12 @@ def health():
 
 @app.route("/config")
 def show_config():
-    """显示当前配置（生产环境建议禁用或限制访问）"""
+    """显示当前配置"""
     config = {
         "data_source_base_url": DATA_SOURCE_BASE_URL,
         "api_timeout": API_TIMEOUT,
         "log_level": LOG_LEVEL,
         "flask_env": FLASK_ENV,
-        "cors_origins": CORS_ORIGINS,
         "secret_key_set": bool(SECRET_KEY and SECRET_KEY != "dev-secret-key-change-in-production")
     }
     return jsonify(format_response(data=config))
@@ -646,8 +584,6 @@ def wind_wave_data():
         st2 = payload.get("st2")
         classic = payload.get("classic")
 
-        log_request_info("/api/wind_wave_data", payload)
-
         if not (st1 and st2 and classic):
             return jsonify(format_response("error", None, "缺少参数: st1, st2, classic")), 400
 
@@ -661,6 +597,18 @@ def wind_wave_data():
         wind_result = get_wind_wave_data(st1, st2, classic, "wind")
         wave_result = get_wind_wave_data(st1, st2, classic, "wave")
 
+        # 检查是否有数据
+        has_wind_data = wind_result.get("status") == "success" and wind_result.get("count", 0) > 0
+        has_wave_data = wave_result.get("status") == "success" and wave_result.get("count", 0) > 0
+
+        if not has_wind_data and not has_wave_data:
+            error_msg = "未获取到任何风浪数据"
+            if wind_result.get("error"):
+                error_msg += f" (风数据: {wind_result.get('error')})"
+            if wave_result.get("error"):
+                error_msg += f" (浪数据: {wave_result.get('error')})"
+            return jsonify(format_response("error", None, error_msg)), 404
+
         response_data = format_response(
             data={
                 "wind": wind_result,
@@ -673,15 +621,12 @@ def wind_wave_data():
             }
         )
 
-        print(f"✅ 风浪数据获取完成，总数据量: {wind_result.get('count', 0) + wave_result.get('count', 0)}条")
+        print(f"✅ 风浪数据获取完成")
         return jsonify(response_data)
 
     except Exception as e:
         error_msg = str(e)
         print(f"❌ 服务器内部错误: {error_msg}")
-        if LOG_LEVEL == "DEBUG":
-            import traceback
-            traceback.print_exc()
         return jsonify(format_response("error", None, f"服务器内部错误: {error_msg}")), 500
 
 
@@ -694,8 +639,6 @@ def imu_platform_swing():
         st2 = payload.get("st2")
         classic = payload.get("classic")
 
-        log_request_info("/api/imu_platform_swing", payload)
-
         if not (st1 and st2):
             return jsonify(format_response("error", None, "缺少参数: st1, st2")), 400
 
@@ -705,6 +648,9 @@ def imu_platform_swing():
         print(f"🔄 开始处理IMU平台晃动数据: 站点={classic}, 时间={st1}到{st2}")
 
         results = process_imu_data(st1, st2, classic)
+
+        if not results:
+            return jsonify(format_response("error", None, "未找到IMU数据或数据处理失败")), 404
 
         response = format_response(
             data={
@@ -725,9 +671,6 @@ def imu_platform_swing():
 
     except Exception as e:
         print(f"❌ 处理失败: {str(e)}")
-        if LOG_LEVEL == "DEBUG":
-            import traceback
-            traceback.print_exc()
         return jsonify(format_response("error", None, f"处理失败: {str(e)}")), 500
 
 
@@ -739,8 +682,6 @@ def imu_file_list():
         st1 = payload.get("st1")
         st2 = payload.get("st2")
         classic = payload.get("classic")
-
-        log_request_info("/api/imu_file_list", payload)
 
         if not (st1 and st2):
             return jsonify(format_response("error", None, "缺少参数: st1, st2")), 400
@@ -756,25 +697,32 @@ def imu_file_list():
 
         while current_hour <= end_hour:
             year, month, day, hour = current_hour.year, current_hour.month, current_hour.day, current_hour.hour
-            files = get_gnss_data_names(year, month, day, hour)
+            try:
+                files = get_gnss_data_names(year, month, day, hour)
 
-            for filename in files:
-                sdt = extract_timestamp_from_filename(filename)
-                if sdt:
-                    try:
-                        file_dt = datetime.datetime.strptime(sdt, "%Y%m%d%H%M")
-                        if dt_start <= file_dt <= dt_end:
-                            all_files_info.append({
-                                "filename": filename,
-                                "timestamp": sdt,
-                                "datetime": file_dt.strftime("%Y-%m-%d %H:%M")
-                            })
-                    except:
-                        pass
+                for filename in files:
+                    sdt = extract_timestamp_from_filename(filename)
+                    if sdt:
+                        try:
+                            file_dt = datetime.datetime.strptime(sdt, "%Y%m%d%H%M")
+                            if dt_start <= file_dt <= dt_end:
+                                all_files_info.append({
+                                    "filename": filename,
+                                    "timestamp": sdt,
+                                    "datetime": file_dt.strftime("%Y-%m-%d %H:%M")
+                                })
+                        except:
+                            continue
+            except Exception as e:
+                print(f"❌ 获取小时{current_hour}文件列表失败: {e}")
+                # 继续处理其他小时
 
             current_hour += datetime.timedelta(hours=1)
 
         all_files_info.sort(key=lambda x: x["timestamp"])
+
+        if not all_files_info:
+            return jsonify(format_response("error", None, "未找到任何文件")), 404
 
         response = format_response(
             data={
@@ -807,7 +755,6 @@ if __name__ == "__main__":
     print(f"📡 数据源: {DATA_SOURCE_BASE_URL}")
     print(f"⏱️  超时: {API_TIMEOUT}秒")
     print(f"📝 日志级别: {LOG_LEVEL}")
-    print(f"🔗 CORS允许源: {CORS_ORIGINS}")
     print("=" * 50)
     print("🛠️ 可用端点:")
     print("  GET  /           - 主页")
